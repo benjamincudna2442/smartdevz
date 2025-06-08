@@ -1,13 +1,13 @@
-import asyncio
 from typing import Dict, List
-from quart import Quart, request, jsonify
+from flask import Flask, request, jsonify
 from pyrogram import Client
 from pyrogram.raw import functions, types
 from pyrogram.errors import FloodWait, RPCError
 from uuid import uuid4
+import time
 
-# Quart app setup (async-compatible Flask)
-app = Quart(__name__)
+# Flask app setup
+app = Flask(__name__)
 
 # Data models for structured output
 class BotInfo:
@@ -66,7 +66,7 @@ class BotDataResponse:
         }
 
 # Helper function to initialize Pyrogram client
-async def create_client(bot_token: str, api_id: int, api_hash: str) -> Client:
+def create_client(bot_token: str, api_id: int, api_hash: str) -> Client:
     try:
         session_name = f"bot_{uuid4().hex}"
         client = Client(
@@ -76,7 +76,7 @@ async def create_client(bot_token: str, api_id: int, api_hash: str) -> Client:
             api_hash=api_hash,
             in_memory=True
         )
-        await client.start()
+        client.start()
         return client
     except Exception as e:
         raise Exception(f"Failed to initialize client: {str(e)}")
@@ -104,7 +104,7 @@ def merge_chat_data(existing: Chat | None, new: Chat) -> Chat:
     )
 
 # Helper function to get chats and users using updates.GetDifference
-async def get_chats_and_users(client: Client) -> tuple[List[Chat], List[User]]:
+def get_chats_and_users(client: Client) -> tuple[List[Chat], List[User]]:
     chats: Dict[int, Chat] = {}
     users: Dict[int, User] = {}
     inaccessible_chats = set()
@@ -115,7 +115,7 @@ async def get_chats_and_users(client: Client) -> tuple[List[Chat], List[User]]:
 
     try:
         while True:
-            diff = await client.invoke(
+            diff = client.invoke(
                 functions.updates.GetDifference(
                     pts=custom_pts,
                     date=custom_date,
@@ -215,8 +215,8 @@ async def get_chats_and_users(client: Client) -> tuple[List[Chat], List[User]]:
                 break
 
     except FloodWait as fw:
-        await asyncio.sleep(fw.value)
-        return await get_chats_and_users(client)
+        time.sleep(fw.value)
+        return get_chats_and_users(client)
     except Exception as e:
         raise Exception(f"Error fetching chats and users: {str(e)}")
 
@@ -224,7 +224,7 @@ async def get_chats_and_users(client: Client) -> tuple[List[Chat], List[User]]:
 
 # API endpoint for root/info
 @app.route('/', methods=['GET'])
-async def get_api_info():
+def get_api_info():
     return jsonify({
         "api_name": "Telegram Users API",
         "version": "1.0.0",
@@ -259,7 +259,7 @@ async def get_api_info():
 
 # API endpoint for documentation
 @app.route('/docs', methods=['GET'])
-async def get_docs():
+def get_docs():
     return jsonify({
         "title": "Telegram Users API Tutorial",
         "version": "1.0.0",
@@ -325,7 +325,7 @@ print(data)
 
 # API endpoint to fetch bot data
 @app.route('/tgusers', methods=['GET'])
-async def get_bot_data():
+def get_bot_data():
     try:
         # Get bot token from query parameter
         bot_token = request.args.get('token')
@@ -333,10 +333,10 @@ async def get_bot_data():
             return jsonify({"error": "Bot token is required"}), 400
 
         # Initialize client
-        client = await create_client(bot_token, api_id=26512884, api_hash="c3f491cd59af263cfc249d3f93342ef8")
+        client = create_client(bot_token, api_id=26512884, api_hash="c3f491cd59af263cfc249d3f93342ef8")
 
         # Get bot info
-        me = await client.get_me()
+        me = client.get_me()
         bot_info = BotInfo(
             first_name=me.first_name,
             id=me.id,
@@ -344,10 +344,10 @@ async def get_bot_data():
         )
 
         # Get chats and users
-        chats, users = await get_chats_and_users(client)
+        chats, users = get_chats_and_users(client)
 
         # Stop client
-        await client.stop()
+        client.stop()
 
         # Create response
         response = BotDataResponse(
@@ -363,6 +363,6 @@ async def get_bot_data():
     except Exception as e:
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
-# Run the Quart app
+# Run the Flask app
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000)
