@@ -1,4 +1,4 @@
-quart
+flask
 asyncio
 kurigram
 tgcrypto
