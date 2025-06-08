@@ -2,3 +2,4 @@ quart
 asyncio
 kurigram
 tgcrypto
+asyncio
