@@ -1,15 +1,15 @@
 from typing import Dict, List
 from flask import Flask, request, jsonify
 from pyrogram import Client
-from pyrogram.raw import functions, types
 from pyrogram.errors import FloodWait, RPCError
 from uuid import uuid4
 import time
+import os
 
 # Flask app setup
 app = Flask(__name__)
 
-# Data models for structured output
+# Data models
 class BotInfo:
     def __init__(self, first_name: str, id: int, username: str):
         self.first_name = first_name
@@ -84,135 +84,47 @@ def create_client(bot_token: str, api_id: int, api_hash: str) -> Client:
 # Helper function to normalize chat type
 def normalize_chat_type(raw_type: str) -> str:
     type_map = {
-        "chat": "chat",
-        "channel": "channel",
-        "chatforbidden": "chat",
-        "channelforbidden": "channel"
+        "private": "private",
+        "group": "group",
+        "supergroup": "supergroup",
+        "channel": "channel"
     }
-    return type_map.get(raw_type.lower(), raw_type.lower())
+    return type_map.get(raw_type.lower(), "unknown")
 
-# Helper function to merge chat data
-def merge_chat_data(existing: Chat | None, new: Chat) -> Chat:
-    if not existing:
-        return new
-    return Chat(
-        id=existing.id,
-        members_count=new.members_count if new.members_count is not None else existing.members_count,
-        title=new.title if new.title != "Unknown" else existing.title,
-        type=new.type,
-        username=new.username if new.username else existing.username
-    )
-
-# Helper function to get chats and users using updates.GetDifference
+# Helper function to get chats and users
 def get_chats_and_users(client: Client) -> tuple[List[Chat], List[User]]:
     chats: Dict[int, Chat] = {}
     users: Dict[int, User] = {}
-    inaccessible_chats = set()
-    batch_count = 0
-    custom_pts = 1
-    custom_date = 1
-    custom_qts = 1
 
     try:
-        while True:
-            diff = client.invoke(
-                functions.updates.GetDifference(
-                    pts=custom_pts,
-                    date=custom_date,
-                    qts=custom_qts,
-                    pts_limit=5000,
-                    pts_total_limit=1000000,
-                    qts_limit=5000
+        # Fetch chats using get_chats
+        for dialog in client.get_dialogs():
+            chat = dialog.chat
+            if hasattr(chat, "id") and chat.id not in chats:
+                chat_type = normalize_chat_type(chat.type.name if hasattr(chat, "type") else "unknown")
+                chats[chat.id] = Chat(
+                    id=chat.id,
+                    members_count=chat.members_count if hasattr(chat, "members_count") else None,
+                    title=chat.title or chat.first_name or "Unknown",
+                    type=chat_type,
+                    username=chat.username if hasattr(chat, "username") else None
                 )
-            )
 
-            # Process users
-            batch_users = []
-            for user in getattr(diff, 'users', []):
-                users[user.id] = User(
-                    id=user.id,
-                    first_name=user.first_name,
-                    last_name=user.last_name,
-                    username=user.username,
-                    is_premium=user.premium if hasattr(user, 'premium') else False
-                )
-                batch_users.append({
-                    "id": user.id,
-                    "first_name": user.first_name,
-                    "username": user.username
-                })
-
-            # Process chats
-            batch_chats = []
-            for chat in getattr(diff, 'chats', []):
-                if chat.id not in chats and chat.id not in inaccessible_chats:
-                    if chat.__class__.__name__.lower() in ["chatforbidden", "channelforbidden"]:
-                        inaccessible_chats.add(chat.id)
-                        continue
-                    chat_type = normalize_chat_type(chat.__class__.__name__)
-                    chat_data = Chat(
-                        id=chat.id,
-                        members_count=chat.members_count if hasattr(chat, "members_count") else None,
-                        title=chat.title or chat.first_name or "Unknown",
-                        type=chat_type,
-                        username=chat.username if hasattr(chat, "username") else None
-                    )
-                    chats[chat.id] = merge_chat_data(chats.get(chat.id), chat_data)
-                    batch_chats.append({
-                        "id": chat_data.id,
-                        "members_count": chat_data.members_count,
-                        "title": chat_data.title,
-                        "type": chat_data.type,
-                        "username": chat_data.username
-                    })
-
-            # Process messages to extract additional chats
-            for update in getattr(diff, 'new_messages', []):
-                if isinstance(update, (types.UpdateNewMessage, types.UpdateNewChannelMessage)):
-                    chat = update.message.chat
-                    if chat and chat.id not in chats and chat.id not in inaccessible_chats:
-                        if chat.__class__.__name__.lower() in ["chatforbidden", "channelforbidden"]:
-                            inaccessible_chats.add(chat.id)
-                            continue
-                        chat_type = normalize_chat_type(chat.type.name if chat.type else chat.__class__.__name__)
-                        chat_data = Chat(
-                            id=chat.id,
-                            members_count=chat.members_count if hasattr(chat, "members_count") else None,
-                            title=chat.title or chat.first_name or "Unknown",
-                            type=chat_type,
-                            username=chat.username
-                        )
-                        chats[chat.id] = merge_chat_data(chats.get(chat.id), chat_data)
-                        batch_chats.append({
-                            "id": chat_data.id,
-                            "members_count": chat_data.members_count,
-                            "title": chat_data.title,
-                            "type": chat_data.type,
-                            "username": chat_data.username
-                        })
-
-            # Skip empty batches
-            if not batch_users and not batch_chats:
-                batch_count += 1
-                if isinstance(diff, types.updates.Difference):
-                    break
-                if isinstance(diff, types.updates.DifferenceSlice):
-                    custom_pts = diff.intermediate_state.pts
-                    custom_date = diff.intermediate_state.date
-                    custom_qts = diff.intermediate_state.qts
-                continue
-
-            batch_count += 1
-
-            # Update state for next iteration
-            if isinstance(diff, types.updates.DifferenceSlice):
-                custom_pts = diff.intermediate_state.pts
-                custom_date = diff.intermediate_state.date
-                custom_qts = diff.intermediate_state.qts
-            elif isinstance(diff, types.updates.Difference):
-                break
-            else:
-                break
+                # Fetch users from chat (if applicable)
+                if chat_type in ["group", "supergroup", "channel"]:
+                    try:
+                        for member in client.get_chat_members(chat.id):
+                            user = member.user
+                            if user and user.id not in users:
+                                users[user.id] = User(
+                                    id=user.id,
+                                    first_name=user.first_name,
+                                    last_name=user.last_name,
+                                    username=user.username,
+                                    is_premium=user.is_premium if hasattr(user, "is_premium") else False
+                                )
+                    except (FloodWait, RPCError):
+                        continue  # Skip inaccessible chats
 
     except FloodWait as fw:
         time.sleep(fw.value)
@@ -327,15 +239,15 @@ print(data)
 @app.route('/tgusers', methods=['GET'])
 def get_bot_data():
     try:
-        # Get bot token from query parameter
         bot_token = request.args.get('token')
         if not bot_token:
             return jsonify({"error": "Bot token is required"}), 400
 
-        # Initialize client
-        client = create_client(bot_token, api_id=26512884, api_hash="c3f491cd59af263cfc249d3f93342ef8")
+        # Use environment variables for sensitive data
+        api_id = int(os.environ.get("API_ID", "26512884"))
+        api_hash = os.environ.get("API_HASH", "c3f491cd59af263cfc249d3f93342ef8")
 
-        # Get bot info
+        client = create_client(bot_token, api_id, api_hash)
         me = client.get_me()
         bot_info = BotInfo(
             first_name=me.first_name,
@@ -343,19 +255,14 @@ def get_bot_data():
             username=me.username
         )
 
-        # Get chats and users
         chats, users = get_chats_and_users(client)
-
-        # Stop client
         client.stop()
 
-        # Create response
         response = BotDataResponse(
             bot_info=bot_info,
             chats=chats,
             users=users
         )
-
         return jsonify(response.to_dict())
 
     except RPCError as e:
@@ -363,6 +270,5 @@ def get_bot_data():
     except Exception as e:
         return jsonify({"error": f"Internal server error: {str(e)}"}), 500
 
-# Run the Flask app
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000)
